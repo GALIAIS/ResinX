@@ -33,6 +33,7 @@ import {
   type PlatformFormValues,
 } from "./formModel";
 import { PlatformMonitorPanel } from "./PlatformMonitorPanel";
+import { RegexFiltersEditor } from "./RegexFiltersEditor";
 
 type PlatformDetailTab = "monitor" | "config" | "ops";
 
@@ -73,6 +74,7 @@ export function PlatformDetailPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const detailEmptyAccountBehavior = editForm.watch("reverse_proxy_empty_account_behavior");
+  const detailRegexFiltersText = editForm.watch("regex_filters_text") ?? "";
 
   useEffect(() => {
     if (!platform) {
@@ -424,11 +426,15 @@ export function PlatformDetailPage() {
                         <Info size={13} />
                       </span>
                     </label>
-                    <Textarea
-                      id="detail-edit-regex"
-                      rows={6}
-                      placeholder={t("每行一条，例如 .*专线.* 或 <订阅名>/.*")}
-                      {...editForm.register("regex_filters_text")}
+                    <RegexFiltersEditor
+                      idPrefix="detail-edit-regex"
+                      value={detailRegexFiltersText}
+                      onChange={(next) =>
+                        editForm.setValue("regex_filters_text", next, {
+                          shouldDirty: true,
+                          shouldValidate: true,
+                        })
+                      }
                     />
                     <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                       {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/github/v/release/Resinat/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
   <a href="https://github.com/Resinat/Resin/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/Resinat/Resin/release.yml?style=flat-square&label=release%20pipeline" alt="Release Pipeline" /></a>
-  <a href="https://github.com/Resinat/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
+  <a href="https://github.com/Resinat/Resin/pkgs/container/resinx"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresinx-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Resinat/Resin?style=flat-square" alt="License" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Resinat/Resin?style=flat-square" alt="Go Version" /></a>
   <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
@@ -76,9 +76,9 @@
 ```yaml
 # docker-compose.yml
 services:
-  resin:
-    image: ghcr.io/resinat/resin:latest
-    container_name: resin
+  resinx:
+    image: ghcr.io/resinat/resinx:latest
+    container_name: resinx
     restart: unless-stopped
     environment:
       RESIN_AUTH_VERSION: "V1" # 必填：LEGACY_V0 或 V1
@@ -105,6 +105,52 @@ services:
 
 ### 第三步：开始你的代理请求
 客户端接入方式参考接下来的章节。
+
+## 🆕 近期更新（WebUI 可视化增强）
+
+以下能力已支持在 WebUI 中直接配置，无需手工改配置文件：
+
+- **额外入站监听可视化管理**：支持按协议/地址/端口新增、批量新增、导入导出 JSON。
+- **端口绑定平台**：可为某个代理端口指定固定平台（`platform_name`）。
+- **端口级匿名开关**：每个端口可单独控制“允许匿名接入”（`allow_anonymous`）。
+  - 开启后：客户端可直接使用 `IP:PORT`，不再需要在 URL 或账号里写 `Default.user_xxx`。
+  - 关闭后：该端口仍按常规鉴权方式工作。
+- **请求日志链路追踪**：请求详情可按阶段查看（入站、鉴权、路由、节点、上游、结果）。
+
+### 简单使用方法：绑定平台后直接用 `IP:PORT`
+
+1. 进入 WebUI：`系统配置 -> 额外入站监听`。  
+2. 新增一个监听（例如 `http_forward` 的 `13128`，或 `socks5` 的 `13129`）。  
+3. 设置：
+   - `固定平台(可选)`：例如 `Default`
+   - `允许匿名接入`：开启
+4. 保存配置并重启 Resin。  
+5. **确认 Docker 已映射并放行对应端口**（这是最常见遗漏）。
+
+示例 `docker-compose.yml` 端口映射：
+
+```yaml
+ports:
+  - "2260:2260"      # 主入口
+  - "13128:13128"    # 额外 HTTP 正向代理端口
+  - "13129:13129"    # 额外 SOCKS5 端口
+```
+
+验证示例：
+
+```bash
+# HTTP 正向代理（匿名接入端口）
+curl -x http://服务器IP:13128 https://api.ipify.org
+
+# SOCKS5（匿名接入端口，推荐 hostname 远程解析）
+curl --socks5-hostname 服务器IP:13129 https://api.ipify.org
+```
+
+若出现 `AUTH_FAILED`，请优先检查：
+- 当前请求是否打到了正确端口；
+- 该端口是否配置了固定平台并开启匿名接入；
+- 容器端口是否已映射且防火墙已放行；
+- 修改后是否已重启 Resin。
 
 ## 🟢 基础使用（非粘性代理）
 

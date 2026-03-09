@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createColumnHelper } from "@tanstack/react-table";
-import { AlertTriangle, Eraser, RefreshCw, Sparkles, X } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, Eraser, RefreshCw, Sparkles, X, XCircle } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -23,6 +23,7 @@ import type { RequestLogItem, RequestLogListFilters } from "./types";
 
 type BoolFilter = "all" | "true" | "false";
 type ProxyTypeFilter = "all" | "1" | "2";
+type QuickView = "all" | "upstream_error" | "http_5xx" | "slow";
 
 type FilterDraft = {
   from_local: string;
@@ -68,6 +69,11 @@ function toRFC3339(localDateTime: string): string {
     return "";
   }
   return date.toISOString();
+}
+
+function toLocalDateTimeValue(date: Date): string {
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
 }
 
 function boolFromFilter(value: BoolFilter): boolean | undefined {
@@ -288,6 +294,80 @@ function dateLocale(): string {
   return isEnglishLocale(getCurrentLocale()) ? "en-US" : "zh-CN";
 }
 
+type TraceStepStatus = "success" | "warning" | "failed";
+
+type TraceStep = {
+  key: string;
+  label: string;
+  detail: string;
+  status: TraceStepStatus;
+};
+
+function firstNonEmpty(values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    const normalized = value?.trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function buildRequestTraceSteps(log: RequestLogItem): TraceStep[] {
+  const authId = firstNonEmpty([log.account, log.client_ip]);
+  const routeTarget = firstNonEmpty([log.platform_name, log.platform_id]);
+  const nodeTarget = firstNonEmpty([log.node_tag, log.node_hash]);
+  const upstreamErr = firstNonEmpty([log.upstream_err_msg, log.upstream_errno, log.upstream_err_kind]);
+
+  const step1: TraceStep = {
+    key: "ingress",
+    label: "入站接收",
+    detail: firstNonEmpty([log.ts, "已进入 Resin 入站监听"]),
+    status: "success",
+  };
+
+  const step2: TraceStep = {
+    key: "auth",
+    label: "鉴权/身份",
+    detail: authId || "未识别账号，按匿名流量处理",
+    status: authId ? "success" : "warning",
+  };
+
+  const step3: TraceStep = {
+    key: "route",
+    label: "平台路由",
+    detail: routeTarget || "未匹配平台，使用默认全局路由",
+    status: routeTarget ? "success" : "warning",
+  };
+
+  const step4: TraceStep = {
+    key: "node",
+    label: "节点命中",
+    detail: nodeTarget || "未记录命中节点",
+    status: nodeTarget ? "success" : (log.resin_error ? "failed" : "warning"),
+  };
+
+  const step5: TraceStep = {
+    key: "upstream",
+    label: "上游连接/请求",
+    detail: firstNonEmpty([log.upstream_stage, upstreamErr, "上游阶段未报告异常"]),
+    status: log.upstream_stage || upstreamErr ? "failed" : (log.net_ok ? "success" : "warning"),
+  };
+
+  const hasHttpStatus = Number.isInteger(log.http_status) && log.http_status > 0;
+  const step6: TraceStep = {
+    key: "result",
+    label: "结果返回",
+    detail: firstNonEmpty([
+      log.resin_error,
+      hasHttpStatus ? `HTTP ${log.http_status}` : "",
+      log.net_ok ? "网络链路成功完成" : "网络链路未完成",
+    ]),
+    status: log.resin_error ? "failed" : (log.net_ok ? "success" : "warning"),
+  };
+
+  return [step1, step2, step3, step4, step5, step6];
+}
 
 function splitDateTime(input: string): { date: string; time: string } {
   if (!input) {
@@ -323,6 +403,7 @@ export function RequestLogsPage() {
   const [selectedLogId, setSelectedLogId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [payloadTab, setPayloadTab] = useState<PayloadTab>("request");
+  const [quickView, setQuickView] = useState<QuickView>("all");
   const [payloadData, setPayloadData] = useState<{ headers: string; body: string }>({
     headers: "",
     body: "",
@@ -365,6 +446,20 @@ export function RequestLogsPage() {
   const isPageTransitioning = logsQuery.isFetching && logsQuery.isPlaceholderData;
 
   const visibleLogs = isPageTransitioning ? EMPTY_LOGS : logs;
+  const quickViewLogs = useMemo(() => {
+    if (quickView === "all") {
+      return visibleLogs;
+    }
+    if (quickView === "upstream_error") {
+      return visibleLogs.filter((item) =>
+        Boolean(item.resin_error || item.upstream_stage || item.upstream_err_kind || item.upstream_errno || item.upstream_err_msg)
+      );
+    }
+    if (quickView === "http_5xx") {
+      return visibleLogs.filter((item) => item.http_status >= 500 && item.http_status <= 599);
+    }
+    return visibleLogs.filter((item) => item.duration_ms >= 3000);
+  }, [visibleLogs, quickView]);
 
   const selectedLog = useMemo(() => {
     if (!selectedLogId) {
@@ -383,6 +478,16 @@ export function RequestLogsPage() {
   });
 
   const detailLog: RequestLogItem | null = detailQuery.data ?? selectedLog ?? null;
+  const traceSteps = useMemo(() => (detailLog ? buildRequestTraceSteps(detailLog) : []), [detailLog]);
+  const traceStatus = useMemo<TraceStepStatus>(() => {
+    if (traceSteps.some((step) => step.status === "failed")) {
+      return "failed";
+    }
+    if (traceSteps.some((step) => step.status === "warning")) {
+      return "warning";
+    }
+    return "success";
+  }, [traceSteps]);
 
   const payloadQuery = useQuery({
     queryKey: ["request-log-payload", detailLogId],
@@ -407,12 +512,58 @@ export function RequestLogsPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [drawerVisible]);
 
-  const updateFilter = <K extends keyof FilterDraft>(key: K, value: FilterDraft[K]) => {
-    setFilters((prev) => ({ ...prev, [key]: value }));
+  const applyFilterPatch = (patch: Partial<FilterDraft>) => {
+    setFilters((prev) => ({ ...prev, ...patch }));
     setCursorStack([""]);
     setPageIndex(0);
     setSelectedLogId("");
     setDrawerOpen(false);
+  };
+
+  const updateFilter = <K extends keyof FilterDraft>(key: K, value: FilterDraft[K]) => {
+    applyFilterPatch({ [key]: value } as Partial<FilterDraft>);
+  };
+
+  const applyPreset = (preset: "all_recent" | "failed_last_15m" | "forward_failed_last_15m" | "reverse_failed_last_15m") => {
+    if (preset === "all_recent") {
+      const from = toLocalDateTimeValue(new Date(Date.now() - 60 * 60_000));
+      applyFilterPatch({
+        ...defaultFilters,
+        from_local: from,
+      });
+      setQuickView("all");
+      return;
+    }
+
+    const from = toLocalDateTimeValue(new Date(Date.now() - 15 * 60_000));
+    if (preset === "failed_last_15m") {
+      applyFilterPatch({
+        ...defaultFilters,
+        from_local: from,
+        net_ok: "false",
+      });
+      setQuickView("all");
+      return;
+    }
+
+    if (preset === "forward_failed_last_15m") {
+      applyFilterPatch({
+        ...defaultFilters,
+        from_local: from,
+        net_ok: "false",
+        proxy_type: "1",
+      });
+      setQuickView("all");
+      return;
+    }
+
+    applyFilterPatch({
+      ...defaultFilters,
+      from_local: from,
+      net_ok: "false",
+      proxy_type: "2",
+    });
+    setQuickView("all");
   };
 
   const resetFilters = () => {
@@ -421,6 +572,7 @@ export function RequestLogsPage() {
     setPageIndex(0);
     setSelectedLogId("");
     setDrawerOpen(false);
+    setQuickView("all");
   };
 
   const openDrawer = (logId: string) => {
@@ -648,6 +800,38 @@ export function RequestLogsPage() {
       <Card className="filter-card platform-list-card platform-directory-card">
         <div className="list-card-header">
           <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem", width: "100%" }}>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{t("预设筛选")}</span>
+              <Button size="sm" variant="secondary" onClick={() => applyPreset("all_recent")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("近1小时全部")}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => applyPreset("failed_last_15m")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("近15分钟失败")}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => applyPreset("forward_failed_last_15m")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("正向失败排查")}
+              </Button>
+              <Button size="sm" variant="secondary" onClick={() => applyPreset("reverse_failed_last_15m")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("反向失败排查")}
+              </Button>
+            </div>
+
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>{t("排障视图")}</span>
+              <Button size="sm" variant={quickView === "all" ? "primary" : "secondary"} onClick={() => setQuickView("all")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("全部")} ({visibleLogs.length})
+              </Button>
+              <Button size="sm" variant={quickView === "upstream_error" ? "primary" : "secondary"} onClick={() => setQuickView("upstream_error")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("上游异常")} ({visibleLogs.filter((item) => Boolean(item.resin_error || item.upstream_stage || item.upstream_err_kind || item.upstream_errno || item.upstream_err_msg)).length})
+              </Button>
+              <Button size="sm" variant={quickView === "http_5xx" ? "primary" : "secondary"} onClick={() => setQuickView("http_5xx")} style={{ minHeight: "30px", height: "30px" }}>
+                HTTP 5xx ({visibleLogs.filter((item) => item.http_status >= 500 && item.http_status <= 599).length})
+              </Button>
+              <Button size="sm" variant={quickView === "slow" ? "primary" : "secondary"} onClick={() => setQuickView("slow")} style={{ minHeight: "30px", height: "30px" }}>
+                {t("慢请求")}({">=3s"}) ({visibleLogs.filter((item) => item.duration_ms >= 3000).length})
+              </Button>
+            </div>
+
             {/* 时间与路由信息 */}
             <div
               className="logs-inline-filters"
@@ -817,16 +1001,16 @@ export function RequestLogsPage() {
           </div>
         ) : null}
 
-        {!logsQuery.isLoading && !isPageTransitioning && !visibleLogs.length ? (
+        {!logsQuery.isLoading && !isPageTransitioning && !quickViewLogs.length ? (
           <div className="empty-box">
             <Sparkles size={16} />
-            <p>{t("没有匹配日志")}</p>
+            <p>{quickView === "all" ? t("没有匹配日志") : t("当前排障视图下没有匹配日志")}</p>
           </div>
         ) : null}
 
-        {visibleLogs.length ? (
+        {quickViewLogs.length ? (
           <DataTable
-            data={visibleLogs}
+            data={quickViewLogs}
             columns={logColumns}
             onRowClick={(log) => openDrawer(log.id)}
             selectedRowId={drawerVisible ? detailLogId : undefined}
@@ -925,6 +1109,74 @@ export function RequestLogsPage() {
                   <div>
                     <span>{t("客户端 IP")}</span>
                     <p>{detailLog.client_ip || "-"}</p>
+                  </div>
+                </div>
+              </section>
+
+              <section className="platform-drawer-section">
+                <div className="platform-drawer-section-head">
+                  <h4>{t("链路追踪")}</h4>
+                  <p>{t("按阶段展示请求链路和失败位置。")}</p>
+                </div>
+                <div style={{
+                  backgroundColor: "var(--surface)",
+                  border: "1px solid var(--border)",
+                  borderRadius: "12px",
+                  padding: "16px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
+                    {traceStatus === "success" ? (
+                      <CheckCircle2 size={16} style={{ color: "var(--success)" }} />
+                    ) : traceStatus === "failed" ? (
+                      <XCircle size={16} style={{ color: "var(--danger)" }} />
+                    ) : (
+                      <Clock3 size={16} style={{ color: "var(--warning)" }} />
+                    )}
+                    <span style={{ fontWeight: 600, color: "var(--text)" }}>
+                      {traceStatus === "success"
+                        ? t("链路状态：成功")
+                        : traceStatus === "failed"
+                          ? t("链路状态：失败")
+                          : t("链路状态：部分完成")}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gap: "8px" }}>
+                    {traceSteps.map((step, index) => {
+                      const accent = step.status === "success"
+                        ? "var(--success)"
+                        : step.status === "failed"
+                          ? "var(--danger)"
+                          : "var(--warning)";
+                      const Icon = step.status === "success"
+                        ? CheckCircle2
+                        : step.status === "failed"
+                          ? XCircle
+                          : Clock3;
+                      return (
+                        <div
+                          key={step.key}
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "20px auto",
+                            gap: "10px",
+                            alignItems: "flex-start",
+                            padding: "8px 10px",
+                            borderRadius: "10px",
+                            border: "1px solid var(--border)",
+                            backgroundColor: "color-mix(in srgb, var(--surface) 88%, var(--surface-alt) 12%)",
+                          }}
+                        >
+                          <Icon size={15} style={{ color: accent, marginTop: "2px" }} />
+                          <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>{index + 1}.</span>
+                              <strong style={{ color: "var(--text)" }}>{t(step.label)}</strong>
+                            </div>
+                            <p style={{ margin: "4px 0 0", color: "var(--text-secondary)", wordBreak: "break-word" }}>{step.detail}</p>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </section>

@@ -1,3 +1,11 @@
+export type InboundListener = {
+  protocol: "http_forward" | "socks5";
+  listen_address: string;
+  port: number;
+  platform_name: string;
+  allow_anonymous?: boolean;
+};
+
 export type RuntimeConfig = {
   user_agent: string;
   request_log_enabled: boolean;
@@ -16,6 +24,7 @@ export type RuntimeConfig = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: number;
+  extra_inbound_listeners: InboundListener[];
 };
 
 export type EnvConfig = {
@@ -58,6 +67,40 @@ export type EnvConfig = {
   proxy_token_set: boolean;
   admin_token_weak: boolean;
   proxy_token_weak: boolean;
+  extra_inbound_listeners: InboundListener[];
 };
 
 export type RuntimeConfigPatch = Partial<RuntimeConfig>;
+
+export type InboundStatusItem = {
+  name: string;
+  protocol: string;
+  listen_address: string;
+  port: number;
+  platform_name?: string;
+  source: string;
+  probe_target: string;
+  reachable: boolean;
+  probe_latency_ms: number;
+  probe_error?: string;
+};
+
+export type InboundStatusResponse = {
+  generated_at: string;
+  items: InboundStatusItem[];
+};
+
+export type SecurityFinding = {
+  code: string;
+  severity: "high" | "medium" | "low";
+  title: string;
+  detail: string;
+  recommendation: string;
+};
+
+export type SecurityAuditResponse = {
+  generated_at: string;
+  score: number;
+  level: "good" | "warning" | "critical";
+  findings: SecurityFinding[];
+};

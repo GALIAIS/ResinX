@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/github/v/release/Resinat/Resin?style=flat-square&label=release&sort=semver" alt="Release" /></a>
   <a href="https://github.com/Resinat/Resin/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/Resinat/Resin/release.yml?style=flat-square&label=release%20pipeline" alt="Release Pipeline" /></a>
-  <a href="https://github.com/Resinat/Resin/pkgs/container/resin"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresin-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
+  <a href="https://github.com/Resinat/Resin/pkgs/container/resinx"><img src="https://img.shields.io/badge/ghcr-ghcr.io%2Fresinat%2Fresinx-2496ED?style=flat-square&logo=docker&logoColor=white" alt="GHCR Image" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/LICENSE"><img src="https://img.shields.io/github/license/Resinat/Resin?style=flat-square" alt="License" /></a>
   <a href="https://github.com/Resinat/Resin/blob/master/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Resinat/Resin?style=flat-square" alt="Go Version" /></a>
   <a href="https://github.com/Resinat/Resin/releases"><img src="https://img.shields.io/badge/support-linux%20%7C%20macOS%20%7C%20windows%20%C2%B7%20amd64%20%7C%20arm64-0A7EA4?style=flat-square" alt="Support Matrix" /></a>
@@ -76,9 +76,9 @@ Docker Compose is the recommended quick-start path:
 ```yaml
 # docker-compose.yml
 services:
-  resin:
-    image: ghcr.io/resinat/resin:latest
-    container_name: resin
+  resinx:
+    image: ghcr.io/resinat/resinx:latest
+    container_name: resinx
     restart: unless-stopped
     environment:
       RESIN_AUTH_VERSION: "V1" # Required: LEGACY_V0 or V1
@@ -108,6 +108,52 @@ Run `docker compose up -d` to start the service.
 ### Step 3: Start sending proxy requests
 
 Use one of the client access modes in the following sections.
+
+## 🆕 Recent Updates (WebUI UX Enhancements)
+
+These features are now configurable directly in WebUI (no manual config-file edits required):
+
+- **Visual management for extra inbound listeners**: add/edit/remove listeners, batch creation, JSON import/export.
+- **Port-bound platform**: assign a fixed platform (`platform_name`) to a specific proxy port.
+- **Per-port anonymous access switch**: each listener can independently control `allow_anonymous`.
+  - Enabled: clients can use `IP:PORT` directly, without `Default.user_xxx` in URL/auth identity.
+  - Disabled: the listener keeps normal authentication behavior.
+- **Request trace view**: request log detail now shows stage-by-stage trace (ingress, auth, routing, node, upstream, result).
+
+### Quick Usage: Use `IP:PORT` Directly with Port-bound Platform
+
+1. Open WebUI: `System Config -> Extra Inbound Listeners`.
+2. Add a listener (for example `http_forward` on `13128`, or `socks5` on `13129`).
+3. Set:
+   - `Fixed Platform (Optional)`: for example `Default`
+   - `Allow Anonymous Access`: enabled
+4. Save config and restart Resin.
+5. **Make sure Docker ports are published and firewall rules allow them** (most common miss).
+
+Example `docker-compose.yml` port mappings:
+
+```yaml
+ports:
+  - "2260:2260"      # main entry
+  - "13128:13128"    # extra HTTP forward proxy port
+  - "13129:13129"    # extra SOCKS5 port
+```
+
+Validation examples:
+
+```bash
+# HTTP forward proxy (anonymous-enabled port)
+curl -x http://SERVER_IP:13128 https://api.ipify.org
+
+# SOCKS5 (anonymous-enabled port, hostname remote resolve recommended)
+curl --socks5-hostname SERVER_IP:13129 https://api.ipify.org
+```
+
+If you see `AUTH_FAILED`, check first:
+- request is sent to the correct port;
+- that listener has both fixed platform and anonymous access enabled;
+- container port mapping and firewall are correct;
+- Resin has been restarted after config changes.
 
 ## 🟢 Basic Usage (Non-sticky Proxy)
 

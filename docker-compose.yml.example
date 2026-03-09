@@ -1,10 +1,10 @@
 services:
-  resin:
+  resinx:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/resinat/resin:latest
-    container_name: resin
+    image: ghcr.io/resinat/resinx:latest
+    container_name: resinx
     restart: unless-stopped
     environment:
       RESIN_AUTH_VERSION: ${RESIN_AUTH_VERSION}
@@ -16,9 +16,9 @@ services:
     ports:
       - "2260:2260"
     volumes:
-      - resin_cache:/var/cache/resin
-      - resin_state:/var/lib/resin
-      - resin_log:/var/log/resin
+      - resinx_cache:/var/cache/resin
+      - resinx_state:/var/lib/resin
+      - resinx_log:/var/log/resin
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:2260/healthz >/dev/null || exit 1"]
       interval: 30s
@@ -27,6 +27,6 @@ services:
       start_period: 20s
 
 volumes:
-  resin_cache:
-  resin_state:
-  resin_log:
+  resinx_cache:
+  resinx_state:
+  resinx_log:

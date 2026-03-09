@@ -1,3 +1,5 @@
 /resin
 sing-box-reference
 .agents
+.gocache/
+.gomodcache/

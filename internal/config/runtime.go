@@ -33,6 +33,9 @@ type RuntimeConfig struct {
 	// Persistence
 	CacheFlushInterval       Duration `json:"cache_flush_interval"`
 	CacheFlushDirtyThreshold int      `json:"cache_flush_dirty_threshold"`
+
+	// Extra inbounds
+	ExtraInboundListeners []InboundListener `json:"extra_inbound_listeners"`
 }
 
 // NewDefaultRuntimeConfig returns a RuntimeConfig populated with the default
@@ -61,5 +64,6 @@ func NewDefaultRuntimeConfig() *RuntimeConfig {
 
 		CacheFlushInterval:       Duration(5 * time.Minute),
 		CacheFlushDirtyThreshold: 1000,
+		ExtraInboundListeners:    []InboundListener{},
 	}
 }

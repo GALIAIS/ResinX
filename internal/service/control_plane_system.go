@@ -88,6 +88,7 @@ var runtimeConfigAllowedFields = map[string]bool{
 	"latency_decay_window":                     true,
 	"cache_flush_interval":                     true,
 	"cache_flush_dirty_threshold":              true,
+	"extra_inbound_listeners":                  true,
 }
 
 var platformPatchAllowedFields = map[string]bool{
@@ -142,6 +143,7 @@ func copyRuntimeConfig(cfg *config.RuntimeConfig) *config.RuntimeConfig {
 	}
 	out := *cfg
 	out.LatencyAuthorities = append([]string(nil), cfg.LatencyAuthorities...)
+	out.ExtraInboundListeners = append([]config.InboundListener(nil), cfg.ExtraInboundListeners...)
 	return &out
 }
 
@@ -235,6 +237,19 @@ func validateRuntimeConfig(cfg *config.RuntimeConfig) *ServiceError {
 	minCacheFlushInterval := 5 * time.Second
 	if time.Duration(cfg.CacheFlushInterval) < minCacheFlushInterval {
 		return invalidArg("cache_flush_interval: must be >= 5s")
+	}
+	listenerAddrPortSeen := map[string]struct{}{}
+	for idx, listener := range cfg.ExtraInboundListeners {
+		normalized, err := config.NormalizeInboundListenerForRuntime(listener)
+		if err != nil {
+			return invalidArg(fmt.Sprintf("extra_inbound_listeners[%d]: %v", idx, err))
+		}
+		key := strings.ToLower(strings.TrimSpace(normalized.ListenAddress)) + fmt.Sprintf(":%d", normalized.Port)
+		if _, exists := listenerAddrPortSeen[key]; exists {
+			return invalidArg(fmt.Sprintf("extra_inbound_listeners[%d]: duplicate listen endpoint %s:%d", idx, normalized.ListenAddress, normalized.Port))
+		}
+		listenerAddrPortSeen[key] = struct{}{}
+		cfg.ExtraInboundListeners[idx] = normalized
 	}
 
 	// LatencyTestURL domain must be in LatencyAuthorities.

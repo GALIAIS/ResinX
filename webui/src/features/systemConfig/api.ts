@@ -1,7 +1,9 @@
 import { apiRequest } from "../../lib/api-client";
-import type { EnvConfig, RuntimeConfig, RuntimeConfigPatch } from "./types";
+import type { EnvConfig, InboundListener, InboundStatusResponse, RuntimeConfig, RuntimeConfigPatch, SecurityAuditResponse } from "./types";
 
 const path = "/api/v1/system/config";
+const inboundStatusPath = "/api/v1/system/inbounds/status";
+const securityAuditPath = "/api/v1/system/security/audit";
 
 const DEFAULT_CONFIG: RuntimeConfig = {
   user_agent: "",
@@ -21,7 +23,38 @@ const DEFAULT_CONFIG: RuntimeConfig = {
   latency_decay_window: "",
   cache_flush_interval: "",
   cache_flush_dirty_threshold: 0,
+  extra_inbound_listeners: [],
 };
+
+function normalizeInboundListeners(raw: unknown): InboundListener[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") {
+        return null;
+      }
+      const rec = item as Record<string, unknown>;
+      const protocol = String(rec.protocol ?? "").trim().toLowerCase();
+      if (protocol !== "http_forward" && protocol !== "socks5") {
+        return null;
+      }
+      const platformName = asString(rec.platform_name, "");
+      const allowAnonymousRaw = rec.allow_anonymous;
+      const allowAnonymous = typeof allowAnonymousRaw === "boolean"
+        ? allowAnonymousRaw
+        : platformName.trim() !== "";
+      return {
+        protocol,
+        listen_address: asString(rec.listen_address, "0.0.0.0"),
+        port: asNumber(rec.port, 0),
+        platform_name: platformName,
+        allow_anonymous: allowAnonymous,
+      } as InboundListener;
+    })
+    .filter((item): item is InboundListener => item !== null && item.port > 0);
+}
 
 function asNumber(raw: unknown, fallback: number): number {
   const value = Number(raw);
@@ -81,6 +114,7 @@ function normalizeRuntimeConfig(raw: Partial<RuntimeConfig> | null | undefined):
       raw.cache_flush_dirty_threshold,
       DEFAULT_CONFIG.cache_flush_dirty_threshold,
     ),
+    extra_inbound_listeners: normalizeInboundListeners(raw.extra_inbound_listeners),
   };
 }
 
@@ -104,4 +138,22 @@ export async function patchSystemConfig(patch: RuntimeConfigPatch): Promise<Runt
 
 export async function getEnvConfig(): Promise<EnvConfig> {
   return await apiRequest<EnvConfig>(path + "/env");
+}
+
+export async function getInboundStatuses(): Promise<InboundStatusResponse> {
+  const data = await apiRequest<InboundStatusResponse>(inboundStatusPath);
+  return {
+    generated_at: data?.generated_at ?? "",
+    items: Array.isArray(data?.items) ? data.items : [],
+  };
+}
+
+export async function getSecurityAudit(): Promise<SecurityAuditResponse> {
+  const data = await apiRequest<SecurityAuditResponse>(securityAuditPath);
+  return {
+    generated_at: data?.generated_at ?? "",
+    score: Number.isFinite(Number(data?.score)) ? Number(data.score) : 0,
+    level: data?.level === "critical" || data?.level === "warning" ? data.level : "good",
+    findings: Array.isArray(data?.findings) ? data.findings : [],
+  };
 }

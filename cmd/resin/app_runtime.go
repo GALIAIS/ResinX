@@ -42,6 +42,10 @@ type resinApp struct {
 	requestlogSvc  *requestlog.Service
 	inboundSrv     *http.Server
 	inboundLn      net.Listener
+	extraHTTPSrv   []*http.Server
+	extraHTTPLn    []net.Listener
+	extraSOCKS     []*proxy.Socks5Proxy
+	extraSOCKSLn   []net.Listener
 	transportPool  *proxy.OutboundTransportPool
 }
 
@@ -406,6 +410,7 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	forwardProxy := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
 		ProxyToken:        a.envCfg.ProxyToken,
 		AuthVersion:       string(a.envCfg.AuthVersion),
+		ForcedPlatform:    "",
 		Router:            a.topoRuntime.router,
 		Pool:              a.topoRuntime.pool,
 		Health:            a.topoRuntime.pool,
@@ -443,7 +448,64 @@ func (a *resinApp) buildNetworkServers(engine *state.StateEngine) error {
 	a.inboundLn = proxy.NewCountingListener(inboundLn, a.metricsManager)
 	a.inboundSrv = &http.Server{Handler: inboundHandler}
 
+	extraListeners := a.effectiveExtraInboundListeners()
+	for idx, listenerCfg := range extraListeners {
+		addr := formatListenAddress(listenerCfg.ListenAddress, listenerCfg.Port)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return fmt.Errorf("extra inbound listener[%d] listen %s (%s): %w", idx, addr, listenerCfg.Protocol, err)
+		}
+		wrappedLn := proxy.NewCountingListener(ln, a.metricsManager)
+		switch listenerCfg.Protocol {
+		case config.InboundProtocolHTTPForward:
+			extraForward := proxy.NewForwardProxy(proxy.ForwardProxyConfig{
+				ProxyToken:        a.envCfg.ProxyToken,
+				AuthVersion:       string(a.envCfg.AuthVersion),
+				ForcedPlatform:    listenerCfg.PlatformName,
+				AllowAnonymous:    listenerCfg.EffectiveAllowAnonymous(),
+				Router:            a.topoRuntime.router,
+				Pool:              a.topoRuntime.pool,
+				Health:            a.topoRuntime.pool,
+				Events:            proxyEvents,
+				MetricsSink:       a.metricsManager,
+				OutboundTransport: outboundTransportCfg,
+				TransportPool:     a.transportPool,
+			})
+			a.extraHTTPLn = append(a.extraHTTPLn, wrappedLn)
+			a.extraHTTPSrv = append(a.extraHTTPSrv, &http.Server{Handler: extraForward})
+			log.Printf("Extra HTTP forward listener ready on %s (platform=%q)", addr, listenerCfg.PlatformName)
+		case config.InboundProtocolSOCKS5:
+			socks := proxy.NewSocks5Proxy(proxy.Socks5ProxyConfig{
+				ProxyToken:     a.envCfg.ProxyToken,
+				AuthVersion:    string(a.envCfg.AuthVersion),
+				ForcedPlatform: listenerCfg.PlatformName,
+				AllowAnonymous: listenerCfg.EffectiveAllowAnonymous(),
+				Router:         a.topoRuntime.router,
+				Pool:           a.topoRuntime.pool,
+				Health:         a.topoRuntime.pool,
+				Events:         proxyEvents,
+			})
+			a.extraSOCKSLn = append(a.extraSOCKSLn, wrappedLn)
+			a.extraSOCKS = append(a.extraSOCKS, socks)
+			log.Printf("Extra SOCKS5 listener ready on %s (platform=%q)", addr, listenerCfg.PlatformName)
+		default:
+			_ = wrappedLn.Close()
+			return fmt.Errorf("unsupported extra inbound protocol %q", listenerCfg.Protocol)
+		}
+	}
+
 	return nil
+}
+
+func (a *resinApp) effectiveExtraInboundListeners() []config.InboundListener {
+	if a == nil {
+		return nil
+	}
+	runtimeListeners := runtimeConfigSnapshot(a.runtimeCfg).ExtraInboundListeners
+	if len(runtimeListeners) > 0 {
+		return append([]config.InboundListener(nil), runtimeListeners...)
+	}
+	return append([]config.InboundListener(nil), a.envCfg.ExtraInboundListeners...)
 }
 
 func (a *resinApp) buildProxyEvents() proxy.ConfigAwareEventEmitter {
@@ -489,6 +551,22 @@ func (a *resinApp) startServers() <-chan error {
 		log.Printf("Resin server starting on %s", formatListenURL(a.envCfg.ListenAddress, a.envCfg.ResinPort))
 		reportServerErr("resin server", a.inboundSrv.Serve(a.inboundLn))
 	}()
+	for i := range a.extraHTTPSrv {
+		srv := a.extraHTTPSrv[i]
+		ln := a.extraHTTPLn[i]
+		go func(s *http.Server, l net.Listener) {
+			log.Printf("Extra HTTP forward listener starting on %s", l.Addr().String())
+			reportServerErr("extra http forward listener", s.Serve(l))
+		}(srv, ln)
+	}
+	for i := range a.extraSOCKS {
+		socks := a.extraSOCKS[i]
+		ln := a.extraSOCKSLn[i]
+		go func(s *proxy.Socks5Proxy, l net.Listener) {
+			log.Printf("Extra SOCKS5 listener starting on %s", l.Addr().String())
+			reportServerErr("extra socks5 listener", s.Serve(l))
+		}(socks, ln)
+	}
 
 	return serverErrCh
 }
@@ -519,6 +597,16 @@ func formatListenURL(listenAddress string, port int) string {
 func (a *resinApp) shutdown(ctx context.Context) {
 	if err := a.inboundSrv.Shutdown(ctx); err != nil {
 		log.Printf("Server shutdown error: %v", err)
+	}
+	for _, srv := range a.extraHTTPSrv {
+		if err := srv.Shutdown(ctx); err != nil {
+			log.Printf("Extra HTTP listener shutdown error: %v", err)
+		}
+	}
+	for _, ln := range a.extraSOCKSLn {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("Extra SOCKS5 listener close error: %v", err)
+		}
 	}
 	log.Println("Resin server stopped")
 	if a.transportPool != nil {

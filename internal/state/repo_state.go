@@ -103,7 +103,7 @@ func (r *StateRepo) UpsertPlatform(p model.Platform) error {
 	}
 
 	// Validate strongly-typed filters before persistence.
-	if _, err := platform.CompileRegexFilters(p.RegexFilters); err != nil {
+	if _, err := platform.CompileNodeNameRegexFilters(p.RegexFilters); err != nil {
 		return err
 	}
 	if err := platform.ValidateRegionFilters(p.RegionFilters); err != nil {

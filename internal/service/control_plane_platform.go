@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 	"time"
 
@@ -141,10 +140,15 @@ func (cfg platformConfig) toRuntime(id string) (*platform.Platform, error) {
 	if err != nil {
 		return nil, err
 	}
+	compiledNodeNameRegexFilters, err := platform.CompileNodeNameRegexFilters(cfg.RegexFilters)
+	if err != nil {
+		return nil, err
+	}
 	return platform.NewConfiguredPlatform(
 		id,
 		cfg.Name,
 		compiledRegexFilters,
+		compiledNodeNameRegexFilters,
 		cfg.RegionFilters,
 		cfg.StickyTTLNs,
 		cfg.ReverseProxyMissAction,
@@ -682,7 +686,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		return nil, invalidArg("exactly one of platform_id or platform_spec is required")
 	}
 
-	var regexFilters []*regexp.Regexp
+	var regexFilters []node.CompiledRegexFilter
 	var regionFilters []string
 
 	if hasPlatformID {
@@ -690,10 +694,10 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 		if !ok {
 			return nil, notFound("platform not found")
 		}
-		regexFilters = plat.RegexFilters
+		regexFilters = plat.NodeNameRegexFilters
 		regionFilters = plat.RegionFilters
 	} else {
-		compiled, err := platform.CompileRegexFilters(req.PlatformSpec.RegexFilters)
+		compiled, err := platform.CompileNodeNameRegexFilters(req.PlatformSpec.RegexFilters)
 		if err != nil {
 			return nil, invalidArg(err.Error())
 		}
@@ -718,7 +722,7 @@ func (s *ControlPlaneService) PreviewFilter(req PreviewFilterRequest) ([]NodeSum
 
 	var result []NodeSummary
 	s.Pool.Range(func(h node.Hash, entry *node.NodeEntry) bool {
-		if !entry.MatchRegexs(regexFilters, subLookup) {
+		if !entry.MatchCompiledRegexFilters(regexFilters, subLookup) {
 			return true
 		}
 		if len(regionFilterSet) > 0 {

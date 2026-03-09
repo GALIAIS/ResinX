@@ -32,6 +32,7 @@ import {
   toPlatformCreateInput,
   type PlatformFormValues,
 } from "./formModel";
+import { RegexFiltersEditor } from "./RegexFiltersEditor";
 import type { Platform } from "./types";
 
 const ZERO_UUID = "00000000-0000-0000-0000-000000000000";
@@ -79,6 +80,7 @@ export function PlatformPage() {
     defaultValues: defaultPlatformFormValues,
   });
   const createEmptyAccountBehavior = createForm.watch("reverse_proxy_empty_account_behavior");
+  const createRegexFiltersText = createForm.watch("regex_filters_text") ?? "";
 
   const createMutation = useMutation({
     mutationFn: createPlatform,
@@ -331,11 +333,15 @@ export function PlatformPage() {
                     <Info size={13} />
                   </span>
                 </label>
-                <Textarea
-                  id="create-regex"
-                  rows={4}
-                  placeholder={t("每行一条，例如 .*专线.* 或 <订阅名>/.*")}
-                  {...createForm.register("regex_filters_text")}
+                <RegexFiltersEditor
+                  idPrefix="create-regex"
+                  value={createRegexFiltersText}
+                  onChange={(next) =>
+                    createForm.setValue("regex_filters_text", next, {
+                      shouldDirty: true,
+                      shouldValidate: true,
+                    })
+                  }
                 />
                 <p className="muted" style={{ marginTop: 4, fontSize: 12 }}>
                   {t("技巧：<订阅名>/.* 可筛选来自该订阅的节点。")}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +26,9 @@ type EnvConfig struct {
 	// Ports
 	ResinPort       int
 	APIMaxBodyBytes int
+	// ExtraInboundListeners defines optional extra listeners for dedicated
+	// forward-proxy entrypoints (HTTP forward / SOCKS5).
+	ExtraInboundListeners []InboundListener
 
 	// Core
 	MaxLatencyTableEntries                          int
@@ -84,6 +86,7 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	// --- Ports ---
 	cfg.ResinPort = envInt("RESIN_PORT", 2260, &errs)
 	cfg.APIMaxBodyBytes = envInt("RESIN_API_MAX_BODY_BYTES", 1<<20, &errs)
+	cfg.ExtraInboundListeners = envInboundListeners("RESIN_EXTRA_INBOUND_LISTENERS", &errs)
 
 	// --- Core ---
 	cfg.MaxLatencyTableEntries = envInt("RESIN_MAX_LATENCY_TABLE_ENTRIES", 12, &errs)
@@ -205,6 +208,31 @@ func LoadEnvConfig() (*EnvConfig, error) {
 
 	validatePort("RESIN_PORT", cfg.ResinPort, &errs)
 	validatePositive("RESIN_API_MAX_BODY_BYTES", cfg.APIMaxBodyBytes, &errs)
+	listenerAddrPortSeen := map[string]struct{}{
+		formatAddrPortKey(cfg.ListenAddress, cfg.ResinPort): {},
+	}
+	for idx, raw := range cfg.ExtraInboundListeners {
+		normalized, err := normalizeInboundListener(raw, cfg.ListenAddress)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("RESIN_EXTRA_INBOUND_LISTENERS[%d]: %v", idx, err))
+			continue
+		}
+		key := formatAddrPortKey(normalized.ListenAddress, normalized.Port)
+		if _, exists := listenerAddrPortSeen[key]; exists {
+			errs = append(
+				errs,
+				fmt.Sprintf(
+					"RESIN_EXTRA_INBOUND_LISTENERS[%d]: duplicate listen endpoint %s:%d",
+					idx,
+					normalized.ListenAddress,
+					normalized.Port,
+				),
+			)
+			continue
+		}
+		listenerAddrPortSeen[key] = struct{}{}
+		cfg.ExtraInboundListeners[idx] = normalized
+	}
 
 	validatePositive("RESIN_MAX_LATENCY_TABLE_ENTRIES", cfg.MaxLatencyTableEntries, &errs)
 	if cfg.MaxLatencyTableEntries > 32 {
@@ -217,10 +245,8 @@ func LoadEnvConfig() (*EnvConfig, error) {
 	if cfg.DefaultPlatformStickyTTL <= 0 {
 		errs = append(errs, "RESIN_DEFAULT_PLATFORM_STICKY_TTL must be positive")
 	}
-	for _, pattern := range cfg.DefaultPlatformRegexFilters {
-		if _, err := regexp.Compile(pattern); err != nil {
-			errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS: invalid regex %q: %v", pattern, err))
-		}
+	if _, err := platform.CompileNodeNameRegexFilters(cfg.DefaultPlatformRegexFilters); err != nil {
+		errs = append(errs, fmt.Sprintf("RESIN_DEFAULT_PLATFORM_REGEX_FILTERS: %v", err))
 	}
 	for _, region := range cfg.DefaultPlatformRegionFilters {
 		if !isLowerAlpha2(region) {
@@ -372,6 +398,26 @@ func envStringSlice(key string, defaultVal []string, errs *[]string) []string {
 		return []string{}
 	}
 	return out
+}
+
+func envInboundListeners(key string, errs *[]string) []InboundListener {
+	v := os.Getenv(key)
+	if strings.TrimSpace(v) == "" {
+		return []InboundListener{}
+	}
+	var out []InboundListener
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: invalid JSON array: %v", key, err))
+		return []InboundListener{}
+	}
+	if out == nil {
+		return []InboundListener{}
+	}
+	return out
+}
+
+func formatAddrPortKey(addr string, port int) string {
+	return strings.ToLower(strings.TrimSpace(addr)) + ":" + strconv.Itoa(port)
 }
 
 func validatePort(name string, value int, errs *[]string) {

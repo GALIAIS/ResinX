@@ -114,43 +114,7 @@ func (e *NodeEntry) SubscriptionCount() int {
 //   - if subLookup is nil, it matches everything (compatibility fallback);
 //   - otherwise, it matches only when at least one enabled subscription exists.
 func (e *NodeEntry) MatchRegexs(regexes []*regexp.Regexp, subLookup SubLookupFunc) bool {
-	if subLookup == nil {
-		return len(regexes) == 0
-	}
-
-	e.mu.RLock()
-	subs := make([]string, len(e.subscriptionIDs))
-	copy(subs, e.subscriptionIDs)
-	e.mu.RUnlock()
-
-	if len(regexes) == 0 {
-		for _, subID := range subs {
-			_, enabled, _, ok := subLookup(subID, e.Hash)
-			if ok && enabled {
-				return true
-			}
-		}
-		// Empty regex with lookup still requires at least one enabled subscription.
-		return false
-	}
-
-	if len(subs) == 0 {
-		return false
-	}
-
-	for _, subID := range subs {
-		name, enabled, tags, ok := subLookup(subID, e.Hash)
-		if !ok || !enabled {
-			continue
-		}
-		for _, tag := range tags {
-			candidate := name + "/" + tag
-			if matchesAll(candidate, regexes) {
-				return true
-			}
-		}
-	}
-	return false
+	return e.MatchCompiledRegexFilters(LegacyRegexFilters(regexes), subLookup)
 }
 
 // matchesAll returns true if s matches every regex in the list.
@@ -161,6 +125,75 @@ func matchesAll(s string, regexes []*regexp.Regexp) bool {
 		}
 	}
 	return true
+}
+
+// MatchCompiledRegexFilters tests whether the node matches enhanced regex filters.
+// Include rules are AND-ed together against one candidate tag.
+// Exclude rules are node-level: if any candidate matches one exclude rule, the node is rejected.
+func (e *NodeEntry) MatchCompiledRegexFilters(filters []CompiledRegexFilter, subLookup SubLookupFunc) bool {
+	if subLookup == nil {
+		return len(filters) == 0
+	}
+
+	e.mu.RLock()
+	subs := make([]string, len(e.subscriptionIDs))
+	copy(subs, e.subscriptionIDs)
+	e.mu.RUnlock()
+
+	candidates := make([]compiledCandidate, 0)
+	hasEnabledSub := false
+	for _, subID := range subs {
+		name, enabled, tags, ok := subLookup(subID, e.Hash)
+		if !ok || !enabled {
+			continue
+		}
+		hasEnabledSub = true
+		for _, tag := range tags {
+			candidates = append(candidates, compiledCandidate{
+				full: name + "/" + tag,
+				name: name,
+				tag:  tag,
+			})
+		}
+	}
+
+	if len(filters) == 0 {
+		// Empty regex with lookup still requires at least one enabled subscription.
+		return hasEnabledSub
+	}
+	if !hasEnabledSub || len(candidates) == 0 {
+		return false
+	}
+
+	includeFilters := make([]CompiledRegexFilter, 0, len(filters))
+	for _, f := range filters {
+		if f.Exclude {
+			for _, c := range candidates {
+				if matchesCompiledRegexFilter(c, f) {
+					return false
+				}
+			}
+			continue
+		}
+		includeFilters = append(includeFilters, f)
+	}
+
+	if len(includeFilters) == 0 {
+		return true
+	}
+	for _, c := range candidates {
+		matchedAll := true
+		for _, f := range includeFilters {
+			if !matchesCompiledRegexFilter(c, f) {
+				matchedAll = false
+				break
+			}
+		}
+		if matchedAll {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Condition helpers for platform filtering ---

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/Resinat/Resin/internal/model"
+	"github.com/Resinat/Resin/internal/node"
 )
 
 func isLowerAlpha2(s string) bool {
@@ -38,10 +39,20 @@ func CompileRegexFilters(regexFilters []string) ([]*regexp.Regexp, error) {
 	return compiled, nil
 }
 
+// CompileNodeNameRegexFilters compiles enhanced node-name regex filters.
+func CompileNodeNameRegexFilters(regexFilters []string) ([]node.CompiledRegexFilter, error) {
+	compiled, err := node.CompileRegexFilters(regexFilters)
+	if err != nil {
+		return nil, err
+	}
+	return compiled, nil
+}
+
 // NewConfiguredPlatform builds a runtime platform with non-filter settings applied.
 func NewConfiguredPlatform(
 	id, name string,
 	regexFilters []*regexp.Regexp,
+	nodeNameRegexFilters []node.CompiledRegexFilter,
 	regionFilters []string,
 	stickyTTLNs int64,
 	missAction string,
@@ -54,7 +65,7 @@ func NewConfiguredPlatform(
 		normalizedFixedHeaders = strings.TrimSpace(fixedAccountHeader)
 		fixedHeaders = nil
 	}
-	plat := NewPlatform(id, name, regexFilters, regionFilters)
+	plat := NewPlatformWithNodeNameFilters(id, name, regexFilters, nodeNameRegexFilters, regionFilters)
 	plat.StickyTTLNs = stickyTTLNs
 	plat.ReverseProxyMissAction = missAction
 	plat.ReverseProxyEmptyAccountBehavior = emptyAccountBehavior
@@ -78,6 +89,10 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 	regexFilters, err := CompileModelRegexFilters(mp.ID, mp.RegexFilters)
 	if err != nil {
 		return nil, err
+	}
+	nodeNameRegexFilters, err := CompileNodeNameRegexFilters(mp.RegexFilters)
+	if err != nil {
+		return nil, fmt.Errorf("decode platform %s regex_filters: %w", mp.ID, err)
 	}
 	if err := ValidateRegionFilters(mp.RegionFilters); err != nil {
 		return nil, err
@@ -110,6 +125,7 @@ func BuildFromModel(mp model.Platform) (*Platform, error) {
 		mp.ID,
 		mp.Name,
 		regexFilters,
+		nodeNameRegexFilters,
 		append([]string(nil), mp.RegionFilters...),
 		mp.StickyTTLNs,
 		string(missAction),

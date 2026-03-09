@@ -24,6 +24,8 @@ import (
 type ForwardProxyConfig struct {
 	ProxyToken        string
 	AuthVersion       string
+	ForcedPlatform    string
+	AllowAnonymous    bool
 	Router            *routing.Router
 	Pool              outbound.PoolAccessor
 	Health            HealthRecorder
@@ -38,6 +40,8 @@ type ForwardProxyConfig struct {
 type ForwardProxy struct {
 	token             string
 	authVersion       config.AuthVersion
+	forcedPlatform    string
+	allowAnonymous    bool
 	router            *routing.Router
 	pool              outbound.PoolAccessor
 	health            HealthRecorder
@@ -66,6 +70,8 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 	return &ForwardProxy{
 		token:           cfg.ProxyToken,
 		authVersion:     authVersion,
+		forcedPlatform:  strings.TrimSpace(cfg.ForcedPlatform),
+		allowAnonymous:  cfg.AllowAnonymous,
 		router:          cfg.Router,
 		pool:            cfg.Pool,
 		health:          cfg.Health,
@@ -74,6 +80,29 @@ func NewForwardProxy(cfg ForwardProxyConfig) *ForwardProxy {
 		transportConfig: transportCfg,
 		transportPool:   transportPool,
 	}
+}
+
+func (p *ForwardProxy) applyPlatformPolicy(platformName string) string {
+	if p == nil {
+		return platformName
+	}
+	if p.forcedPlatform != "" {
+		return p.forcedPlatform
+	}
+	return platformName
+}
+
+func (p *ForwardProxy) allowAnonymousOnForcedPlatform(authHeader string) bool {
+	if p == nil {
+		return false
+	}
+	if strings.TrimSpace(p.forcedPlatform) == "" {
+		return false
+	}
+	if !p.allowAnonymous {
+		return false
+	}
+	return strings.TrimSpace(authHeader) == ""
 }
 
 func (p *ForwardProxy) outboundHTTPTransport(routed routedOutbound) *http.Transport {
@@ -127,6 +156,9 @@ func (p *ForwardProxy) authenticateLegacy(r *http.Request) (string, string, *Pro
 		}
 		return platName, account, nil
 	}
+	if p.allowAnonymousOnForcedPlatform(auth) {
+		return "", "", nil
+	}
 
 	user, pass, ok := parseProxyAuthorizationLegacy(auth)
 	if !ok {
@@ -170,6 +202,9 @@ func (p *ForwardProxy) authenticateV1(r *http.Request) (string, string, *ProxyEr
 		}
 		platName, account := parseForwardCredentialV1WhenAuthDisabled(credential)
 		return platName, account, nil
+	}
+	if p.allowAnonymousOnForcedPlatform(auth) {
+		return "", "", nil
 	}
 
 	credential, ok := parseProxyAuthorizationCredentialV1(auth)
@@ -302,6 +337,7 @@ func (p *ForwardProxy) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		writeProxyError(w, authErr)
 		return
 	}
+	platName = p.applyPlatformPolicy(platName)
 
 	lifecycle := newRequestLifecycle(p.events, r, ProxyTypeForward, false)
 	lifecycle.setTarget(r.Host, r.URL.String())
@@ -379,6 +415,7 @@ func (p *ForwardProxy) handleCONNECT(w http.ResponseWriter, r *http.Request) {
 		writeProxyError(w, authErr)
 		return
 	}
+	platName = p.applyPlatformPolicy(platName)
 
 	lifecycle := newRequestLifecycle(p.events, r, ProxyTypeForward, true)
 	lifecycle.setTarget(target, "")

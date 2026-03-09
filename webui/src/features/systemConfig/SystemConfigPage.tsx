@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, RefreshCw, RotateCcw, Save, Sparkles } from "lucide-react";
+import { AlertTriangle, Plus, RefreshCw, RotateCcw, Save, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -11,8 +11,9 @@ import { ToastContainer } from "../../components/ui/Toast";
 import { useToast } from "../../hooks/useToast";
 import i18next, { useI18n } from "../../i18n";
 import { formatApiErrorMessage } from "../../lib/error-message";
-import { getEnvConfig, patchSystemConfig, getSystemConfig, getDefaultSystemConfig } from "./api";
-import type { RuntimeConfig, RuntimeConfigPatch } from "./types";
+import { listPlatforms } from "../platforms/api";
+import { getEnvConfig, getInboundStatuses, getSecurityAudit, patchSystemConfig, getSystemConfig, getDefaultSystemConfig } from "./api";
+import type { InboundListener, RuntimeConfig, RuntimeConfigPatch } from "./types";
 
 type RuntimeConfigForm = {
   user_agent: string;
@@ -32,6 +33,7 @@ type RuntimeConfigForm = {
   latency_decay_window: string;
   cache_flush_interval: string;
   cache_flush_dirty_threshold: string;
+  extra_inbound_listeners: InboundListener[];
 };
 
 const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
@@ -52,27 +54,8 @@ const EDITABLE_FIELDS: Array<keyof RuntimeConfig> = [
   "latency_decay_window",
   "cache_flush_interval",
   "cache_flush_dirty_threshold",
+  "extra_inbound_listeners",
 ];
-
-const FIELD_LABELS: Record<keyof RuntimeConfig, string> = {
-  user_agent: "User-Agent",
-  request_log_enabled: "启用请求日志",
-  reverse_proxy_log_detail_enabled: "记录详细反代日志",
-  reverse_proxy_log_req_headers_max_bytes: "请求头最大字节数",
-  reverse_proxy_log_req_body_max_bytes: "请求体最大字节数",
-  reverse_proxy_log_resp_headers_max_bytes: "响应头最大字节数",
-  reverse_proxy_log_resp_body_max_bytes: "响应体最大字节数",
-  max_consecutive_failures: "最大连续失败次数",
-  max_latency_test_interval: "节点延迟最大测试间隔",
-  max_authority_latency_test_interval: "权威域名最大测试间隔",
-  max_egress_test_interval: "出口 IP 更新检查间隔",
-  latency_test_url: "延迟测试目标 URL",
-  latency_authorities: "延迟测试权威域名列表",
-  p2c_latency_window: "P2C 延迟衰减窗口",
-  latency_decay_window: "历史延迟衰减窗口",
-  cache_flush_interval: "缓存异步刷盘间隔",
-  cache_flush_dirty_threshold: "缓存刷盘脏阈值",
-};
 
 const ALLOCATION_POLICY_LABELS: Record<string, string> = {
   BALANCED: "均衡",
@@ -110,6 +93,7 @@ function configToForm(config: RuntimeConfig): RuntimeConfigForm {
     latency_decay_window: config.latency_decay_window,
     cache_flush_interval: config.cache_flush_interval,
     cache_flush_dirty_threshold: String(config.cache_flush_dirty_threshold),
+    extra_inbound_listeners: config.extra_inbound_listeners.map((item) => ({ ...item })),
   };
 }
 
@@ -144,6 +128,43 @@ function parseAuthorities(raw: string): string[] {
     .filter(Boolean);
 
   return Array.from(new Set(items));
+}
+
+function parseInboundListeners(items: InboundListener[]): InboundListener[] {
+  const endpointSet = new Set<string>();
+  return items.map((item, idx) => {
+    const protocol = String(item.protocol ?? "").trim();
+    if (protocol !== "http_forward" && protocol !== "socks5") {
+      throw new Error(`额外入站监听第 ${idx + 1} 项 protocol 非法`);
+    }
+    const listenAddress = String(item.listen_address ?? "").trim();
+    if (!listenAddress) {
+      throw new Error(`额外入站监听第 ${idx + 1} 项 listen_address 不能为空`);
+    }
+    const port = Number(item.port ?? 0);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`额外入站监听第 ${idx + 1} 项 port 非法`);
+    }
+    const endpoint = `${listenAddress.toLowerCase()}:${port}`;
+    if (endpointSet.has(endpoint)) {
+      throw new Error(`额外入站监听第 ${idx + 1} 项与其他监听重复: ${listenAddress}:${port}`);
+    }
+    endpointSet.add(endpoint);
+    const platformName = String(item.platform_name ?? "").trim();
+    const allowAnonymous = typeof item.allow_anonymous === "boolean"
+      ? item.allow_anonymous
+      : platformName !== "";
+    if (allowAnonymous && !platformName) {
+      throw new Error(`额外入站监听第 ${idx + 1} 项启用了匿名接入，但未设置固定平台`);
+    }
+    return {
+      protocol: protocol as InboundListener["protocol"],
+      listen_address: listenAddress,
+      port,
+      platform_name: platformName,
+      allow_anonymous: allowAnonymous,
+    } as InboundListener;
+  });
 }
 
 function parseForm(form: RuntimeConfigForm): RuntimeConfig {
@@ -190,6 +211,7 @@ function parseForm(form: RuntimeConfigForm): RuntimeConfig {
     latency_decay_window: parseDurationField("历史延迟衰减窗口", form.latency_decay_window),
     cache_flush_interval: parseDurationField("缓存异步刷盘间隔", form.cache_flush_interval),
     cache_flush_dirty_threshold: parseNonNegativeInt("缓存刷盘脏阈值", form.cache_flush_dirty_threshold),
+    extra_inbound_listeners: parseInboundListeners(form.extra_inbound_listeners),
   };
 }
 
@@ -205,16 +227,33 @@ function displayEmptyAccountBehavior(value: string): string {
   return EMPTY_ACCOUNT_BEHAVIOR_LABELS[value] ?? value;
 }
 
-function arrayEquals(a: string[], b: string[]): boolean {
+function arrayEquals(a: unknown[], b: unknown[]): boolean {
   if (a.length !== b.length) {
     return false;
   }
   for (let i = 0; i < a.length; i += 1) {
-    if (a[i] !== b[i]) {
+    if (JSON.stringify(a[i]) !== JSON.stringify(b[i])) {
       return false;
     }
   }
   return true;
+}
+
+function generateSecureToken(length = 40): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_";
+  const out: string[] = [];
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    const buf = new Uint32Array(length);
+    window.crypto.getRandomValues(buf);
+    for (let i = 0; i < length; i += 1) {
+      out.push(chars[buf[i] % chars.length]);
+    }
+    return out.join("");
+  }
+  for (let i = 0; i < length; i += 1) {
+    out.push(chars[Math.floor(Math.random() * chars.length)]);
+  }
+  return out.join("");
 }
 
 function buildPatch(current: RuntimeConfig, next: RuntimeConfig): RuntimeConfigPatch {
@@ -243,7 +282,15 @@ function buildPatch(current: RuntimeConfig, next: RuntimeConfig): RuntimeConfigP
 export function SystemConfigPage() {
   const { t } = useI18n();
   const [draftForm, setDraftForm] = useState<RuntimeConfigForm | null>(null);
-  const [customPatchText, setCustomPatchText] = useState<string | null>(null);
+  const [batchProtocol, setBatchProtocol] = useState<InboundListener["protocol"]>("http_forward");
+  const [batchListenAddress, setBatchListenAddress] = useState("0.0.0.0");
+  const [batchStartPort, setBatchStartPort] = useState("13128");
+  const [batchCount, setBatchCount] = useState("1");
+  const [batchPlatformName, setBatchPlatformName] = useState("");
+  const [batchAllowAnonymous, setBatchAllowAnonymous] = useState(true);
+  const [importInboundJSON, setImportInboundJSON] = useState("");
+  const [generatedAdminToken, setGeneratedAdminToken] = useState("");
+  const [generatedProxyToken, setGeneratedProxyToken] = useState("");
   const { toasts, showToast, dismissToast } = useToast();
   const queryClient = useQueryClient();
 
@@ -258,11 +305,28 @@ export function SystemConfigPage() {
     queryFn: getDefaultSystemConfig,
     staleTime: 30_000,
   });
+  const platformListQuery = useQuery({
+    queryKey: ["platforms", "for-system-config"],
+    queryFn: () => listPlatforms({ limit: 500, offset: 0 }),
+    staleTime: 60_000,
+  });
 
   const envConfigQuery = useQuery({
     queryKey: ["system-config-env"],
     queryFn: getEnvConfig,
     staleTime: Infinity, // Env config does not change at runtime
+  });
+  const inboundStatusQuery = useQuery({
+    queryKey: ["system-inbounds-status"],
+    queryFn: getInboundStatuses,
+    staleTime: 5_000,
+    refetchInterval: 15_000,
+  });
+  const securityAuditQuery = useQuery({
+    queryKey: ["system-security-audit"],
+    queryFn: getSecurityAudit,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   });
 
   const baseline = configQuery.data ?? null;
@@ -275,6 +339,17 @@ export function SystemConfigPage() {
     }
     return draftForm ?? configToForm(baseline);
   }, [baseline, draftForm]);
+  const platformNameOptions = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (platformListQuery.data?.items ?? [])
+            .map((item) => String(item.name ?? "").trim())
+            .filter(Boolean)
+        )
+      ).sort((a, b) => a.localeCompare(b)),
+    [platformListQuery.data?.items]
+  );
 
   const parsedResult = useMemo(() => {
     if (!form) {
@@ -303,17 +378,8 @@ export function SystemConfigPage() {
       if (!baseline || !form) {
         throw new Error("配置尚未加载完成");
       }
-      let patchToSend: RuntimeConfigPatch;
-      if (customPatchText !== null) {
-        try {
-          patchToSend = JSON.parse(customPatchText);
-        } catch {
-          throw new Error("手动编辑的 JSON 格式有误，请检查");
-        }
-      } else {
-        const parsed = parseForm(form);
-        patchToSend = buildPatch(baseline, parsed);
-      }
+      const parsed = parseForm(form);
+      const patchToSend = buildPatch(baseline, parsed);
 
       const changedCount = Object.keys(patchToSend).length;
       if (!changedCount) {
@@ -325,7 +391,6 @@ export function SystemConfigPage() {
     onSuccess: ({ updated, changedCount }) => {
       queryClient.setQueryData(["system-config"], updated);
       setDraftForm(null);
-      setCustomPatchText(null);
       showToast("success", t("配置已更新（{{count}} 项变更）", { count: changedCount }));
     },
     onError: (error) => {
@@ -341,6 +406,236 @@ export function SystemConfigPage() {
       const source = prev ?? configToForm(baseline);
       return { ...source, [key]: value };
     });
+  };
+
+  const updateInboundListener = <K extends keyof InboundListener>(
+    index: number,
+    key: K,
+    value: InboundListener[K],
+  ) => {
+    setDraftForm((prev) => {
+      if (!baseline) {
+        return prev;
+      }
+      const source = prev ?? configToForm(baseline);
+      const next = source.extra_inbound_listeners.map((item, i) => {
+        if (i !== index) {
+          return item;
+        }
+        const updated = { ...item, [key]: value };
+        if (key === "platform_name" && !String(value ?? "").trim()) {
+          updated.allow_anonymous = false;
+        }
+        return updated;
+      });
+      return { ...source, extra_inbound_listeners: next };
+    });
+  };
+
+  const addInboundListener = (protocol: InboundListener["protocol"]) => {
+    setDraftForm((prev) => {
+      if (!baseline) {
+        return prev;
+      }
+      const source = prev ?? configToForm(baseline);
+      const existingPorts = new Set(source.extra_inbound_listeners.map((item) => item.port));
+      let candidatePort = protocol === "http_forward" ? 13128 : 13129;
+      while (existingPorts.has(candidatePort) && candidatePort < 65535) {
+        candidatePort += 1;
+      }
+      return {
+        ...source,
+        extra_inbound_listeners: [
+          ...source.extra_inbound_listeners,
+          {
+            protocol,
+            listen_address: "0.0.0.0",
+            port: candidatePort,
+            platform_name: "",
+            allow_anonymous: false,
+          },
+        ],
+      };
+    });
+  };
+
+  const removeInboundListener = (index: number) => {
+    setDraftForm((prev) => {
+      if (!baseline) {
+        return prev;
+      }
+      const source = prev ?? configToForm(baseline);
+      return {
+        ...source,
+        extra_inbound_listeners: source.extra_inbound_listeners.filter((_, i) => i !== index),
+      };
+    });
+  };
+
+  const addInboundListenerBatch = () => {
+    const listenAddress = batchListenAddress.trim();
+    if (!listenAddress) {
+      showToast("error", t("监听地址不能为空"));
+      return;
+    }
+    const startPort = Number(batchStartPort);
+    const count = Number(batchCount);
+    if (!Number.isInteger(startPort) || startPort < 1 || startPort > 65535) {
+      showToast("error", t("起始端口必须是 1-65535 的整数"));
+      return;
+    }
+    if (!Number.isInteger(count) || count < 1 || count > 1000) {
+      showToast("error", t("数量必须是 1-1000 的整数"));
+      return;
+    }
+    if (startPort+count-1 > 65535) {
+      showToast("error", t("端口范围超出 65535"));
+      return;
+    }
+
+    setDraftForm((prev) => {
+      if (!baseline) {
+        return prev;
+      }
+      const source = prev ?? configToForm(baseline);
+      const existing = new Set(source.extra_inbound_listeners.map((item) => `${item.listen_address.toLowerCase()}:${item.port}`));
+      const added: InboundListener[] = [];
+      for (let i = 0; i < count; i += 1) {
+        const port = startPort + i;
+        const endpoint = `${listenAddress.toLowerCase()}:${port}`;
+        if (existing.has(endpoint)) {
+          continue;
+        }
+        existing.add(endpoint);
+        added.push({
+          protocol: batchProtocol,
+          listen_address: listenAddress,
+          port,
+          platform_name: batchPlatformName.trim(),
+          allow_anonymous: batchPlatformName.trim() ? batchAllowAnonymous : false,
+        });
+      }
+      if (added.length === 0) {
+        showToast("error", t("没有新增任何监听（可能都与现有端口重复）"));
+        return source;
+      }
+      showToast("success", t("已新增 {{count}} 个监听", { count: added.length }));
+      return {
+        ...source,
+        extra_inbound_listeners: [...source.extra_inbound_listeners, ...added],
+      };
+    });
+  };
+
+  const applyInboundTemplate = (template: "http_pool" | "socks5_pool" | "mixed_pool") => {
+    setDraftForm((prev) => {
+      if (!baseline) {
+        return prev;
+      }
+      const source = prev ?? configToForm(baseline);
+      const byTemplate: Record<typeof template, InboundListener[]> = {
+        http_pool: [0, 1, 2, 3].map((offset) => ({
+          protocol: "http_forward",
+          listen_address: "0.0.0.0",
+          port: 13128 + offset,
+          platform_name: "",
+          allow_anonymous: false,
+        })),
+        socks5_pool: [0, 1, 2, 3].map((offset) => ({
+          protocol: "socks5",
+          listen_address: "0.0.0.0",
+          port: 13129 + offset,
+          platform_name: "",
+          allow_anonymous: false,
+        })),
+        mixed_pool: [
+          { protocol: "http_forward", listen_address: "0.0.0.0", port: 13128, platform_name: "", allow_anonymous: false },
+          { protocol: "http_forward", listen_address: "0.0.0.0", port: 13130, platform_name: "", allow_anonymous: false },
+          { protocol: "socks5", listen_address: "0.0.0.0", port: 13129, platform_name: "", allow_anonymous: false },
+          { protocol: "socks5", listen_address: "0.0.0.0", port: 13131, platform_name: "", allow_anonymous: false },
+        ],
+      };
+      const next = byTemplate[template];
+      showToast("success", t("已应用端口模板"));
+      return { ...source, extra_inbound_listeners: next };
+    });
+  };
+
+  const exportInboundListenersJSON = async () => {
+    if (!form) {
+      return;
+    }
+    const text = JSON.stringify(form.extra_inbound_listeners, null, 2);
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("success", t("已复制监听配置 JSON 到剪贴板"));
+    } catch {
+      showToast("error", t("复制失败，请使用下载功能"));
+    }
+  };
+
+  const downloadInboundListenersJSON = () => {
+    if (!form) {
+      return;
+    }
+    const text = JSON.stringify(form.extra_inbound_listeners, null, 2);
+    const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "resin-extra-inbounds.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const importInboundListenersFromJSON = (mode: "replace" | "append") => {
+    const raw = importInboundJSON.trim();
+    if (!raw) {
+      showToast("error", t("请先粘贴 JSON"));
+      return;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      showToast("error", t("JSON 格式错误"));
+      return;
+    }
+    if (!Array.isArray(parsed)) {
+      showToast("error", t("JSON 顶层必须是数组"));
+      return;
+    }
+    try {
+      const imported = parseInboundListeners(parsed as InboundListener[]);
+      setDraftForm((prev) => {
+        if (!baseline) {
+          return prev;
+        }
+        const source = prev ?? configToForm(baseline);
+        const merged = mode === "replace"
+          ? imported
+          : parseInboundListeners([...source.extra_inbound_listeners, ...imported]);
+        return { ...source, extra_inbound_listeners: merged };
+      });
+      showToast("success", mode === "replace" ? t("已覆盖导入监听配置") : t("已追加导入监听配置"));
+    } catch (err) {
+      showToast("error", formatApiErrorMessage(err, t));
+    }
+  };
+
+  const copyText = async (text: string, successMessage: string) => {
+    if (!text.trim()) {
+      showToast("error", t("内容为空，无法复制"));
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast("success", successMessage);
+    } catch {
+      showToast("error", t("复制失败，请手动复制"));
+    }
   };
 
   const handleRestoreDefault = (key: keyof RuntimeConfigForm) => {
@@ -361,6 +656,7 @@ export function SystemConfigPage() {
   const renderRestoreButton = (fieldKey: keyof RuntimeConfigForm) => {
     const displayVal = defaultBaseline ? (() => {
       const val = configToForm(defaultBaseline)[fieldKey];
+      if (Array.isArray(val)) return t("共 {{count}} 项", { count: val.length });
       if (typeof val === "boolean") return val ? t("开启") : t("关闭");
       if (val === "") return t("空");
       return String(val);
@@ -394,7 +690,6 @@ export function SystemConfigPage() {
 
   const resetDraft = () => {
     setDraftForm(null);
-    setCustomPatchText(null);
   };
 
   const reloadFromServer = async () => {
@@ -406,24 +701,13 @@ export function SystemConfigPage() {
     }
 
     setDraftForm(null);
-    setCustomPatchText(null);
     const result = await configQuery.refetch();
     if (result.data) {
       showToast("success", t("已加载最新运行时配置"));
     }
   };
 
-  const handlePatchEdit = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setCustomPatchText(e.target.value);
-  };
-
-  const defaultPatchText = useMemo(() => {
-    return JSON.stringify(patchPreview, null, 2);
-  }, [patchPreview]);
-
-  const displayedPatchText = customPatchText ?? defaultPatchText;
-
-  const isSaveDisabled = saveMutation.isPending || (customPatchText === null && (Boolean(parsedResult.error) || !hasUnsavedChanges));
+  const isSaveDisabled = saveMutation.isPending || Boolean(parsedResult.error) || !hasUnsavedChanges;
 
   return (
     <section className="syscfg-page">
@@ -432,6 +716,21 @@ export function SystemConfigPage() {
           <h2>{t("系统配置")}</h2>
           <p className="module-description">{t("按需调整系统参数，保存后立即生效。")}</p>
         </div>
+        {form ? (
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <Badge variant={hasUnsavedChanges ? "warning" : "neutral"}>
+              {hasUnsavedChanges ? t("待保存 {{count}} 项", { count: changedKeys.length }) : t("无待保存变更")}
+            </Badge>
+            <Button onClick={() => void saveMutation.mutateAsync()} disabled={isSaveDisabled}>
+              <Save size={14} />
+              {saveMutation.isPending ? t("保存中...") : t("保存配置")}
+            </Button>
+            <Button variant="ghost" onClick={resetDraft} disabled={!hasUnsavedChanges || saveMutation.isPending}>
+              <RotateCcw size={14} />
+              {t("重置草稿")}
+            </Button>
+          </div>
+        ) : null}
       </header>
 
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
@@ -454,7 +753,7 @@ export function SystemConfigPage() {
         </Card>
       ) : (
         <div className="syscfg-layout">
-          <div className="syscfg-main" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+          <div className="syscfg-main">
             <Card className="syscfg-form-card platform-directory-card">
               <div className="detail-header">
                 <div>
@@ -466,6 +765,12 @@ export function SystemConfigPage() {
                   {t("刷新")}
                 </Button>
               </div>
+              {parsedResult.error ? (
+                <div className="callout callout-error" style={{ marginTop: "10px" }}>
+                  <AlertTriangle size={14} />
+                  <span>{parsedResult.error}</span>
+                </div>
+              ) : null}
 
               <section className="syscfg-section">
                 <h4>{t("基础与健康检查")}</h4>
@@ -504,7 +809,7 @@ export function SystemConfigPage() {
 
               <section className="syscfg-section">
                 <h4>{t("请求日志")}</h4>
-                <div className="syscfg-checkbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }}>
+                <div className="syscfg-checkbox-grid">
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--surface-sunken, rgba(0,0,0,0.02))", padding: "12px 16px", borderRadius: "8px", border: "1px solid var(--border)" }}>
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <span className="field-label" style={{ margin: 0, fontWeight: 500 }}>{t("启用请求日志")}</span>
@@ -527,7 +832,7 @@ export function SystemConfigPage() {
                   </div>
                 </div>
 
-                <div className="form-grid" style={{ marginTop: "16px" }}>
+                <div className="form-grid syscfg-form-grid-spacious">
                   <div className="field-group">
                     <div style={{ display: "flex", alignItems: "center" }}>
                       <label className="field-label" htmlFor="sys-req-h-max" style={{ margin: 0 }}>
@@ -731,7 +1036,408 @@ export function SystemConfigPage() {
                       onChange={(event) => setFormField("cache_flush_dirty_threshold", event.target.value)}
                     />
                   </div>
+                  <div className="field-group field-span-2">
+                    <div className="syscfg-inbound-header">
+                      <div style={{ display: "flex", alignItems: "center" }}>
+                        <label className="field-label" style={{ margin: 0 }}>
+                          {t("额外入站监听")}
+                        </label>
+                        {renderRestoreButton("extra_inbound_listeners")}
+                      </div>
+                      <div className="syscfg-inbound-actions">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => applyInboundTemplate("http_pool")}
+                        >
+                          {t("HTTP 模板")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => applyInboundTemplate("socks5_pool")}
+                        >
+                          {t("SOCKS5 模板")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => applyInboundTemplate("mixed_pool")}
+                        >
+                          {t("混合模板")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => addInboundListener("http_forward")}
+                        >
+                          <Plus size={14} />
+                          {t("新增 HTTP")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          onClick={() => addInboundListener("socks5")}
+                        >
+                          <Plus size={14} />
+                          {t("新增 SOCKS5")}
+                        </Button>
+                        <Button type="button" variant="secondary" size="sm" onClick={exportInboundListenersJSON}>
+                          {t("复制 JSON")}
+                        </Button>
+                        <Button type="button" variant="secondary" size="sm" onClick={downloadInboundListenersJSON}>
+                          {t("下载 JSON")}
+                        </Button>
+                      </div>
+                    </div>
+                    <div className="syscfg-inbound-stack">
+                      <datalist id="syscfg-platform-name-options">
+                        {platformNameOptions.map((name) => (
+                          <option key={name} value={name} />
+                        ))}
+                      </datalist>
+                      <div className="syscfg-inbound-block">
+                        <div style={{ fontWeight: 600, marginBottom: "8px" }}>{t("批量新增监听")}</div>
+                        <div className="syscfg-inbound-batch-grid">
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("协议")}</label>
+                            <select
+                              className="input"
+                              value={batchProtocol}
+                              onChange={(event) => setBatchProtocol(event.target.value === "socks5" ? "socks5" : "http_forward")}
+                            >
+                              <option value="http_forward">http_forward</option>
+                              <option value="socks5">socks5</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("监听地址")}</label>
+                            <Input value={batchListenAddress} onChange={(event) => setBatchListenAddress(event.target.value)} />
+                          </div>
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("起始端口")}</label>
+                            <Input type="number" min={1} max={65535} value={batchStartPort} onChange={(event) => setBatchStartPort(event.target.value)} />
+                          </div>
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("数量")}</label>
+                            <Input type="number" min={1} max={1000} value={batchCount} onChange={(event) => setBatchCount(event.target.value)} />
+                          </div>
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("固定平台(可选)")}</label>
+                            <Input
+                              list="syscfg-platform-name-options"
+                              value={batchPlatformName}
+                              onChange={(event) => setBatchPlatformName(event.target.value)}
+                            />
+                          </div>
+                          <div>
+                            <label className="field-label" style={{ marginBottom: "6px" }}>{t("允许匿名接入")}</label>
+                            <div className="syscfg-inline-switch">
+                              <Switch
+                                checked={batchAllowAnonymous}
+                                disabled={!batchPlatformName.trim()}
+                                onChange={(event) => setBatchAllowAnonymous(event.target.checked)}
+                              />
+                              <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                                {batchPlatformName.trim() ? t("端口直连") : t("需先设置固定平台")}
+                              </span>
+                            </div>
+                          </div>
+                          <Button type="button" variant="secondary" size="sm" onClick={addInboundListenerBatch}>
+                            <Plus size={14} />
+                            {t("批量添加")}
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="syscfg-inbound-block">
+                        <div style={{ fontWeight: 600, marginBottom: "8px" }}>{t("导入监听 JSON")}</div>
+                        <Textarea
+                          rows={5}
+                          placeholder={'[{"protocol":"http_forward","listen_address":"0.0.0.0","port":13128,"platform_name":"Default","allow_anonymous":true}]'}
+                          value={importInboundJSON}
+                          onChange={(event) => setImportInboundJSON(event.target.value)}
+                        />
+                        <div className="syscfg-inline-actions">
+                          <Button type="button" variant="secondary" size="sm" onClick={() => importInboundListenersFromJSON("replace")}>
+                            {t("覆盖导入")}
+                          </Button>
+                          <Button type="button" variant="secondary" size="sm" onClick={() => importInboundListenersFromJSON("append")}>
+                            {t("追加导入")}
+                          </Button>
+                        </div>
+                      </div>
+                      {form.extra_inbound_listeners.map((listener, index) => (
+                        <div key={`${listener.protocol}-${listener.listen_address}-${listener.port}-${index}`} className="syscfg-inbound-item">
+                          <div className="syscfg-inbound-item-grid">
+                            <div>
+                              <label className="field-label" style={{ marginBottom: "6px" }}>{t("协议")}</label>
+                              <select
+                                className="input"
+                                value={listener.protocol}
+                                onChange={(event) => {
+                                  const v = event.target.value === "socks5" ? "socks5" : "http_forward";
+                                  updateInboundListener(index, "protocol", v);
+                                }}
+                              >
+                                <option value="http_forward">http_forward</option>
+                                <option value="socks5">socks5</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="field-label" style={{ marginBottom: "6px" }}>{t("监听地址")}</label>
+                              <Input
+                                value={listener.listen_address}
+                                onChange={(event) => updateInboundListener(index, "listen_address", event.target.value)}
+                                placeholder="0.0.0.0"
+                              />
+                            </div>
+                            <div>
+                              <label className="field-label" style={{ marginBottom: "6px" }}>{t("端口")}</label>
+                              <Input
+                                type="number"
+                                min={1}
+                                max={65535}
+                                value={String(listener.port)}
+                                onChange={(event) => {
+                                  const n = Number(event.target.value);
+                                  updateInboundListener(index, "port", Number.isFinite(n) ? n : 0);
+                                }}
+                              />
+                            </div>
+                            <div>
+                              <label className="field-label" style={{ marginBottom: "6px" }}>{t("固定平台(可选)")}</label>
+                              <Input
+                                list="syscfg-platform-name-options"
+                                value={listener.platform_name}
+                                onChange={(event) => updateInboundListener(index, "platform_name", event.target.value)}
+                                placeholder={t("留空表示不固定平台")}
+                              />
+                            </div>
+                            <div>
+                              <label className="field-label" style={{ marginBottom: "6px" }}>{t("允许匿名接入")}</label>
+                              <div className="syscfg-inline-switch">
+                                <Switch
+                                  checked={Boolean(listener.allow_anonymous)}
+                                  disabled={!listener.platform_name.trim()}
+                                  onChange={(event) => updateInboundListener(index, "allow_anonymous", event.target.checked)}
+                                />
+                                <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                                  {listener.platform_name.trim() ? t("端口直连") : t("需先设置固定平台")}
+                                </span>
+                              </div>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeInboundListener(index)}
+                            >
+                              <Trash2 size={14} />
+                              {t("删除")}
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                      {form.extra_inbound_listeners.length === 0 ? (
+                        <div className="field-hint">{t("暂无额外监听。可通过上方按钮快速新增。")}</div>
+                      ) : null}
+                    </div>
+                    <p className="field-hint">
+                      {t("提示：每个监听地址+端口必须唯一；保存后写入运行时配置，重启 Resin 后生效。")}
+                    </p>
+                    <p className="field-hint">
+                      {t("当监听设置了固定平台后，可直接使用 ip:port 作为代理入口，无需在请求路径或账号中再携带平台名。")}
+                    </p>
+                    {platformListQuery.isError ? (
+                      <p className="field-hint" style={{ color: "var(--danger)" }}>
+                        {t("平台列表加载失败，固定平台仍可手动输入。")}
+                      </p>
+                    ) : null}
+                  </div>
+                </div>
+              </section>
 
+              <section className="syscfg-section">
+                <div className="detail-header" style={{ marginBottom: "8px" }}>
+                  <div>
+                    <h4 style={{ margin: 0 }}>{t("入站监听健康")}</h4>
+                    <p style={{ margin: "4px 0 0", color: "var(--text-muted)" }}>{t("周期性探测各入站端口是否可建立 TCP 连接。")}</p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={async () => {
+                      const result = await inboundStatusQuery.refetch();
+                      if (result.data) showToast("success", t("已刷新入站监听状态"));
+                    }}
+                    disabled={inboundStatusQuery.isFetching}
+                  >
+                    <RefreshCw size={16} className={inboundStatusQuery.isFetching ? "spin" : undefined} />
+                    {t("刷新")}
+                  </Button>
+                </div>
+                {inboundStatusQuery.isError ? (
+                  <div className="callout callout-error" style={{ marginBottom: "10px" }}>
+                    <AlertTriangle size={14} />
+                    <span>{formatApiErrorMessage(inboundStatusQuery.error, t)}</span>
+                  </div>
+                ) : null}
+                <div style={{ border: "1px solid var(--border)", borderRadius: "10px", overflow: "hidden" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                    <thead>
+                      <tr style={{ background: "var(--surface-sunken, rgba(0,0,0,0.03))" }}>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("名称")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("协议")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("监听")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("来源")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("状态")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("延迟")}</th>
+                        <th style={{ textAlign: "left", padding: "8px" }}>{t("错误")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(inboundStatusQuery.data?.items ?? []).map((item) => (
+                        <tr key={`${item.name}-${item.listen_address}-${item.port}-${item.protocol}`} style={{ borderTop: "1px solid var(--border)" }}>
+                          <td style={{ padding: "8px" }}>{item.name}</td>
+                          <td style={{ padding: "8px", fontFamily: "monospace" }}>{item.protocol}</td>
+                          <td style={{ padding: "8px", fontFamily: "monospace" }}>
+                            {item.listen_address}:{item.port}
+                            {item.platform_name ? ` (${item.platform_name})` : ""}
+                          </td>
+                          <td style={{ padding: "8px" }}>{item.source}</td>
+                          <td style={{ padding: "8px", color: item.reachable ? "var(--success)" : "var(--danger)", fontWeight: 600 }}>
+                            {item.reachable ? t("可达") : t("不可达")}
+                          </td>
+                          <td style={{ padding: "8px" }}>{item.probe_latency_ms}ms</td>
+                          <td style={{ padding: "8px", color: "var(--text-muted)" }}>{item.probe_error ?? "-"}</td>
+                        </tr>
+                      ))}
+                      {(inboundStatusQuery.data?.items?.length ?? 0) === 0 ? (
+                        <tr>
+                          <td colSpan={7} style={{ padding: "10px", color: "var(--text-muted)" }}>
+                            {inboundStatusQuery.isLoading ? t("正在探测...") : t("暂无监听数据")}
+                          </td>
+                        </tr>
+                      ) : null}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="field-hint">
+                  {t("最近探测时间")}: {inboundStatusQuery.data?.generated_at || "-"}
+                </p>
+              </section>
+
+              <section className="syscfg-section">
+                <div className="detail-header" style={{ marginBottom: "8px" }}>
+                  <div>
+                    <h4 style={{ margin: 0 }}>{t("安全策略中心")}</h4>
+                    <p style={{ margin: "4px 0 0", color: "var(--text-muted)" }}>
+                      {t("自动检查常见安全风险，并提供强令牌生成与复制。")}
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={async () => {
+                      const result = await securityAuditQuery.refetch();
+                      if (result.data) showToast("success", t("已刷新安全审计结果"));
+                    }}
+                    disabled={securityAuditQuery.isFetching}
+                  >
+                    <RefreshCw size={16} className={securityAuditQuery.isFetching ? "spin" : undefined} />
+                    {t("刷新")}
+                  </Button>
+                </div>
+                {securityAuditQuery.isError ? (
+                  <div className="callout callout-error" style={{ marginBottom: "10px" }}>
+                    <AlertTriangle size={14} />
+                    <span>{formatApiErrorMessage(securityAuditQuery.error, t)}</span>
+                  </div>
+                ) : null}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                  <Card className="platform-directory-card" style={{ margin: 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                      <strong>{t("安全评分")}</strong>
+                      <span
+                        style={{
+                          fontWeight: 700,
+                          color: securityAuditQuery.data?.level === "critical"
+                            ? "var(--danger)"
+                            : securityAuditQuery.data?.level === "warning"
+                              ? "var(--warning)"
+                              : "var(--success)",
+                        }}
+                      >
+                        {securityAuditQuery.data?.score ?? 0}
+                      </span>
+                    </div>
+                    <div className="muted" style={{ fontSize: "12px", marginBottom: "8px" }}>
+                      {t("等级")}: {securityAuditQuery.data?.level ?? "-"}
+                    </div>
+                    <div className="muted" style={{ fontSize: "12px" }}>
+                      {t("最近审计时间")}: {securityAuditQuery.data?.generated_at ?? "-"}
+                    </div>
+                  </Card>
+                  <Card className="platform-directory-card" style={{ margin: 0 }}>
+                    <div style={{ fontWeight: 600, marginBottom: "8px" }}>{t("强令牌生成")}</div>
+                    <div style={{ display: "grid", gap: "8px" }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "8px", alignItems: "center" }}>
+                        <Input value={generatedAdminToken} readOnly placeholder={t("点击生成 Admin Token")} />
+                        <Button type="button" variant="secondary" size="sm" onClick={() => setGeneratedAdminToken(generateSecureToken(40))}>
+                          {t("生成")}
+                        </Button>
+                        <Button type="button" variant="secondary" size="sm" onClick={() => void copyText(generatedAdminToken, t("已复制 Admin Token"))}>
+                          {t("复制")}
+                        </Button>
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto", gap: "8px", alignItems: "center" }}>
+                        <Input value={generatedProxyToken} readOnly placeholder={t("点击生成 Proxy Token")} />
+                        <Button type="button" variant="secondary" size="sm" onClick={() => setGeneratedProxyToken(generateSecureToken(40))}>
+                          {t("生成")}
+                        </Button>
+                        <Button type="button" variant="secondary" size="sm" onClick={() => void copyText(generatedProxyToken, t("已复制 Proxy Token"))}>
+                          {t("复制")}
+                        </Button>
+                      </div>
+                    </div>
+                    <p className="field-hint" style={{ marginTop: "8px" }}>
+                      {t("提示：更新 token 后需修改容器环境变量并重启服务。")}
+                    </p>
+                  </Card>
+                </div>
+                <div style={{ display: "grid", gap: "8px", marginTop: "10px" }}>
+                  {(securityAuditQuery.data?.findings ?? []).map((finding) => (
+                    <div
+                      key={finding.code}
+                      style={{
+                        border: "1px solid var(--border)",
+                        borderRadius: "8px",
+                        padding: "10px",
+                        background: finding.severity === "high"
+                          ? "rgba(239,68,68,0.08)"
+                          : finding.severity === "medium"
+                            ? "rgba(245,158,11,0.08)"
+                            : "rgba(59,130,246,0.08)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: "10px" }}>
+                        <strong>{finding.title}</strong>
+                        <span style={{ fontSize: "12px", fontFamily: "monospace" }}>{finding.severity}</span>
+                      </div>
+                      <div style={{ fontSize: "13px", marginTop: "4px" }}>{finding.detail}</div>
+                      <div className="muted" style={{ fontSize: "12px", marginTop: "6px" }}>
+                        {t("建议")}: {finding.recommendation}
+                      </div>
+                    </div>
+                  ))}
+                  {(securityAuditQuery.data?.findings?.length ?? 0) === 0 ? (
+                    <div className="field-hint">{t("未发现高风险项。")}</div>
+                  ) : null}
                 </div>
               </section>
             </Card>
@@ -779,6 +1485,15 @@ export function SystemConfigPage() {
                     <div className="field-group">
                       <label className="field-label" style={{ margin: 0 }}>{t("统一服务端口")}</label>
                       <Input readOnly disabled value={String(envBaseline.resin_port)} />
+                    </div>
+                    <div className="field-group field-span-2">
+                      <label className="field-label" style={{ margin: 0 }}>{t("额外入站监听(环境变量)")}</label>
+                      <Textarea
+                        readOnly
+                        disabled
+                        rows={6}
+                        value={JSON.stringify(envBaseline.extra_inbound_listeners ?? [], null, 2)}
+                      />
                     </div>
                   </div>
                 </section>
@@ -953,65 +1668,6 @@ export function SystemConfigPage() {
             )}
           </div>
 
-          <div className="syscfg-side">
-            <Card className="syscfg-summary-card platform-directory-card">
-              <div className="detail-header">
-                <div>
-                  <h3>{t("变更摘要")}</h3>
-                  <p>{hasUnsavedChanges ? t("{{count}} 项待提交", { count: changedKeys.length }) : t("当前无未保存改动")}</p>
-                </div>
-              </div>
-
-              {parsedResult.error && customPatchText === null ? (
-                <div className="callout callout-error">
-                  <AlertTriangle size={14} />
-                  <span>{parsedResult.error}</span>
-                </div>
-              ) : null}
-
-              {changedKeys.length ? (
-                <div className="syscfg-change-list">
-                  {changedKeys.map((field) => (
-                    <Badge key={field} variant="neutral">
-                      {t(FIELD_LABELS[field])}
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <div className="empty-box">
-                  <Sparkles size={16} />
-                  <p>{t("修改后会在这里显示变更项")}</p>
-                </div>
-              )}
-
-              <div style={{ marginTop: "16px" }}>
-                <p style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "8px" }}>
-                  {t("保存内容预览")} {customPatchText !== null && <span style={{ color: "var(--primary)" }}>{t("(已手动修改)")}</span>}
-                </p>
-                <Textarea
-                  value={displayedPatchText}
-                  onChange={handlePatchEdit}
-                  rows={10}
-                  style={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace', fontSize: "12px", width: "100%", resize: "vertical", backgroundColor: "var(--surface-sunken)", border: "1px solid var(--border)", borderRadius: "var(--radius)" }}
-                  spellCheck={false}
-                />
-              </div>
-
-              <div className="detail-actions" style={{ justifyContent: "flex-end", marginTop: "16px" }}>
-                <Button
-                  onClick={() => void saveMutation.mutateAsync()}
-                  disabled={isSaveDisabled}
-                >
-                  <Save size={14} />
-                  {saveMutation.isPending ? t("保存中...") : t("保存配置")}
-                </Button>
-                <Button variant="ghost" onClick={resetDraft} disabled={(customPatchText === null && !hasUnsavedChanges) || saveMutation.isPending}>
-                  <RotateCcw size={14} />
-                  {t("重置草稿")}
-                </Button>
-              </div>
-            </Card>
-          </div>
         </div>
       )}
     </section>

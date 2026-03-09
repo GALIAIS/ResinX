@@ -30,8 +30,9 @@ type Platform struct {
 	Name string
 
 	// Filter configuration.
-	RegexFilters  []*regexp.Regexp
-	RegionFilters []string // lowercase ISO codes
+	RegexFilters         []*regexp.Regexp
+	NodeNameRegexFilters []node.CompiledRegexFilter
+	RegionFilters        []string // lowercase ISO codes
 
 	// Other config fields.
 	StickyTTLNs                      int64
@@ -50,12 +51,25 @@ type Platform struct {
 // NewPlatform creates a Platform with an empty routable view.
 func NewPlatform(id, name string, regexFilters []*regexp.Regexp, regionFilters []string) *Platform {
 	return &Platform{
-		ID:            id,
-		Name:          name,
-		RegexFilters:  regexFilters,
-		RegionFilters: regionFilters,
-		view:          NewRoutableView(),
+		ID:                   id,
+		Name:                 name,
+		RegexFilters:         regexFilters,
+		NodeNameRegexFilters: node.LegacyRegexFilters(regexFilters),
+		RegionFilters:        regionFilters,
+		view:                 NewRoutableView(),
 	}
+}
+
+// NewPlatformWithNodeNameFilters creates a platform with enhanced node-name filters.
+func NewPlatformWithNodeNameFilters(
+	id, name string,
+	regexFilters []*regexp.Regexp,
+	nodeNameRegexFilters []node.CompiledRegexFilter,
+	regionFilters []string,
+) *Platform {
+	p := NewPlatform(id, name, regexFilters, regionFilters)
+	p.NodeNameRegexFilters = append([]node.CompiledRegexFilter(nil), nodeNameRegexFilters...)
+	return p
 }
 
 // View returns the platform's routable view as a read-only interface.
@@ -120,7 +134,7 @@ func (p *Platform) evaluateNode(
 	}
 
 	// 2. Tag regex match.
-	if !entry.MatchRegexs(p.RegexFilters, subLookup) {
+	if !entry.MatchCompiledRegexFilters(p.NodeNameRegexFilters, subLookup) {
 		return false
 	}
 

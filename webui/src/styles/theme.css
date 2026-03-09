@@ -851,8 +851,8 @@ a {
 
 .syscfg-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
-  gap: 14px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
 }
 
@@ -901,7 +901,13 @@ a {
 .syscfg-form-card,
 .syscfg-summary-card,
 .syscfg-preview-card {
-  padding: 16px;
+  padding: 18px;
+}
+
+.syscfg-main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
 .rules-panels {
@@ -910,17 +916,12 @@ a {
   gap: 14px;
 }
 
-.syscfg-side {
-  display: grid;
-  gap: 14px;
-}
-
 .syscfg-section {
-  margin-top: 12px;
+  margin-top: 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.74);
-  padding: 12px;
+  padding: 14px;
 }
 
 .syscfg-section h4 {
@@ -936,7 +937,72 @@ a {
   margin-top: 10px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.syscfg-form-grid-spacious {
+  margin-top: 16px;
+}
+
+.syscfg-inbound-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.syscfg-inbound-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
+}
+
+.syscfg-inbound-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.syscfg-inbound-block {
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--surface, rgba(0, 0, 0, 0.01));
+}
+
+.syscfg-inbound-batch-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(120px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.syscfg-inline-switch {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.syscfg-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.syscfg-inbound-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--surface-sunken, rgba(0, 0, 0, 0.02));
+}
+
+.syscfg-inbound-item-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 8px;
+  align-items: end;
 }
 
 .syscfg-change-list {
@@ -2733,6 +2799,14 @@ a {
     grid-template-columns: 1fr;
   }
 
+  .syscfg-inbound-batch-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .syscfg-inbound-item-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .dashboard-kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2904,6 +2978,23 @@ a {
   }
 
   .syscfg-checkbox-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .syscfg-inbound-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .syscfg-inbound-actions {
+    justify-content: flex-start;
+  }
+
+  .syscfg-inbound-batch-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .syscfg-inbound-item-grid {
     grid-template-columns: 1fr;
   }
 
